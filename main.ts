@@ -30,82 +30,120 @@ async function main() {
   }
 }
 
-async function fetchWordData(word: string): Promise<WordData> {
-  // Put your Merriam-Webster API key here
-  const key = "YOUR_API_KEY_HERE";
-  const thesUrl = `https://dictionaryapi.com/api/v3/references/thesaurus/json/${encodeURIComponent(word)}?key=${key}`;
-
-  const thesRes = await fetch(thesUrl);
-
-  if (!thesRes.ok) {
-    const text = await thesRes.text();
-    console.log("Thes response:", text);
-    throw new Error("Failed to fetch thesaurus data");
-  }
-
-  let thesJson: any;
+async function fetchFromMerriamWebster(word: string, key: string): Promise<{ data: { definitions: string[], synonyms: string[], pronunciation: string, origin: string } | null, suggestions: string[] }> {
   try {
-    thesJson = await thesRes.json();
-  } catch (e) {
-    console.log("Failed to parse thesaurus JSON:", e);
-    throw new Error("Invalid response from thesaurus API");
-  }
-
-  // Check if suggestions
-  if (Array.isArray(thesJson) && thesJson.length > 0 && typeof thesJson[0] === 'string') {
-    throw new Error(`Word not found. Suggestions: ${thesJson.slice(0, 5).join(', ')}`);
-  }
-
-  let pronunciation = "Not available";
-  let origin = "Not available";
-
-  // Try to get pronunciation and origin from Merriam-Webster dictionary API
-  try {
+    const thesUrl = `https://dictionaryapi.com/api/v3/references/thesaurus/json/${encodeURIComponent(word)}?key=${key}`;
     const dictUrl = `https://dictionaryapi.com/api/v3/references/collegiate/json/${encodeURIComponent(word)}?key=${key}`;
-    const dictRes = await fetch(dictUrl);
+
+    const [thesRes, dictRes] = await Promise.all([fetch(thesUrl), fetch(dictUrl)]);
+
+    if (!thesRes.ok) return { data: null, suggestions: [] };
+
+    const thesJson = await thesRes.json();
+
+    // Check if suggestions
+    if (Array.isArray(thesJson) && thesJson.length > 0 && typeof thesJson[0] === 'string') {
+      return { data: null, suggestions: thesJson.slice(0, 5) };
+    }
+
+    let pronunciation = "Not available";
+    let origin = "Not available";
+
     if (dictRes.ok) {
-      const text = await dictRes.text();
       try {
-        const dictJson = JSON.parse(text);
+        const dictJson = await dictRes.json();
         if (!Array.isArray(dictJson) || (dictJson.length > 0 && typeof dictJson[0] !== 'string')) {
           pronunciation = parsePronunciation(dictJson);
           origin = parseOrigin(dictJson);
         }
       } catch {}
     }
-  } catch {}
 
-  // If pronunciation is not available from Merriam-Webster, try Wiktionary
-  let wiktHtml = "";
-  if (pronunciation === "Not available") {
-    try {
-      const wiktUrl = `https://en.wiktionary.org/api/rest_v1/page/html/${encodeURIComponent(word)}`;
-      const wiktRes = await fetch(wiktUrl);
-      if (wiktRes.ok) {
-        wiktHtml = await wiktRes.text();
-        pronunciation = parsePronunciationWikt(wiktHtml);
-      }
-    } catch {}
+    return {
+      data: {
+        definitions: parseDefinitions(thesJson),
+        synonyms: parseSynonyms(thesJson),
+        pronunciation,
+        origin
+      },
+      suggestions: []
+    };
+  } catch (e) {
+    console.warn("Merriam-Webster API failed:", e.message);
+    return { data: null, suggestions: [] };
   }
+}
 
-  // Get examples from Wiktionary since Merriam-Webster doesn't provide them
+async function fetchFromWiktionary(word: string): Promise<{ pronunciation: string, examples: string[] }> {
+  let pronunciation = "Not available";
   let examples: string[] = [];
+
   try {
-    const defUrl = `https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word)}`;
-    const defRes = await fetch(defUrl);
+    const [htmlRes, defRes] = await Promise.all([
+      fetch(`https://en.wiktionary.org/api/rest_v1/page/html/${encodeURIComponent(word)}`),
+      fetch(`https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word)}`)
+    ]);
+
+    if (htmlRes.ok) {
+      const html = await htmlRes.text();
+      pronunciation = parsePronunciationWikt(html);
+    }
+
     if (defRes.ok) {
       const defJson = await defRes.json();
       examples = parseExamplesWikt(defJson);
     }
-  } catch {}
+  } catch (e) {
+    console.warn("Wiktionary API failed:", e.message);
+  }
+
+  return { pronunciation, examples };
+}
+
+async function fetchWordData(word: string): Promise<WordData> {
+  // Put your Merriam-Webster API key here
+  const key = "YOUR_API_KEY";
+
+  // Parallel fetch
+  const [mwResult, wiktResult] = await Promise.allSettled([
+    fetchFromMerriamWebster(word, key),
+    fetchFromWiktionary(word)
+  ]);
+
+  const mw = mwResult.status === 'fulfilled' ? mwResult.value : { data: null, suggestions: [] };
+  const wiktData = wiktResult.status === 'fulfilled' ? wiktResult.value : { pronunciation: "Not available", examples: [] };
+
+  // If no data from either, show word doesn't exist with suggestions
+  if (!mw.data && wiktData.pronunciation === "Not available" && wiktData.examples.length === 0) {
+    if (mw.suggestions.length > 0) {
+      console.log(`The word "${word}" doesn't exist. Did you mean: ${mw.suggestions.join(', ')}?`);
+    } else {
+      console.log(`The word "${word}" doesn't exist and no suggestions available.`);
+    }
+    return {
+      word,
+      definitions: [],
+      pronunciation: "Not available",
+      synonyms: [],
+      origin: "Not available",
+      examples: []
+    };
+  }
+
+  // If Merriam-Webster has suggestions but no data, show suggestions
+  if (!mw.data && mw.suggestions.length > 0) {
+    console.log(`Word not found. Suggestions: ${mw.suggestions.join(', ')}`);
+  } else if (!mw.data) {
+    console.log("⚠️  Merriam-Webster failed. Using Wiktionary data only.");
+  }
 
   return {
     word,
-    definitions: parseDefinitions(thesJson),
-    pronunciation,
-    synonyms: parseSynonyms(thesJson),
-    origin,
-    examples
+    definitions: mw.data?.definitions || [],
+    pronunciation: mw.data?.pronunciation === "Not available" ? wiktData.pronunciation : (mw.data?.pronunciation || wiktData.pronunciation),
+    synonyms: mw.data?.synonyms || [],
+    origin: mw.data?.origin || "Not available",
+    examples: wiktData.examples
   };
 }
 
