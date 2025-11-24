@@ -1,6 +1,6 @@
 # Arch Thesaurus
 
-A lightning-fast command-line thesaurus and dictionary that combines Merriam-Webster and Wiktionary APIs for comprehensive word data.
+A command-line thesaurus and dictionary that combines Merriam-Webster and Wiktionary APIs for comprehensive word data.
 
 ## Features
 
